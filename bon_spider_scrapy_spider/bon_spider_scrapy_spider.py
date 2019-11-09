@@ -5,6 +5,10 @@ import re # regex ftw!
 import pyodbc # for ODBC
 import random # for random picking
 import scrapy
+import spoonacular # for spoonacular api.
+
+# https://stackoverflow.com/a/316253
+#from decimal import Decimal
 
 
 BORKED_STRING = '\n\t\t\t'
@@ -33,16 +37,20 @@ if __name__ == 'main':
     db_conn.close()
 
 class DatabaseConnection():
+    # no longer Password123. It is now a different one, thanks to DB maintainer.
     ODBC_STRING = 'DRIVER={ODBC Driver 17 for SQL Server};\
         SERVER=server.com;DATABASE=BonFoodTracker19;\
         UID=dbappuser;PWD=dbapppassword'
+    SPOONACULAR_API_KEY = 'spoonacular_api_key_here'
     
     def __init__(self):
-        pass
+        self.sp_api = spoonacular.API(self.SPOONACULAR_API_KEY)
     
     def connect(self):
         self.conn = pyodbc.connect(self.ODBC_STRING)
         self.cursor = self.conn.cursor()
+        # maybe that will fix stuff?
+        self.cursor.execute('USE BonFoodTracker19;')
 
     def close(self):
         print('[i] CLOSING DB CONNECTION.')
@@ -78,13 +86,19 @@ class DatabaseConnection():
                 for loc in list(set(locs)):
                     # Fake data for traffic for now...
                     random_traffic = random.choice(['Low', 'Medium', 'High'])
-                    # DON'T FORGET TO COMMIT WITH PYODBC! https://stackoverflow.com/a/20199702
-                    # also used https://stackoverflow.com/a/9521382                
+                    
+                    # https://github.com/mkleehammer/pyodbc/wiki/Calling-Stored-Procedures
+                    # except for me, {CALL ...} syntax isn't reliable, probably due to pyodbc being somewhat broken
+                    # or MS SQL being weird (thanks Microsoft...) so I'm using the good old MS SQL exec.
+                    # https://stackoverflow.com/a/28636308
+                    # ^ that's not even the right syntax for MS SQL but it's the right idea. some further tweaking will fix it
                     self.cursor.execute(
-                        'INSERT INTO BonLocation(LocationName, Traffic) VALUES(?, ?);',
+                        'EXEC [BonLocation_AddLocation] ?,?',
                         loc,
                         random_traffic
                     )
+                    # we still must do a .commit(), even with SPs...
+                    # https://stackoverflow.com/a/14826066
                     self.cursor.commit()
                 
             meal_period_index = 0
@@ -98,6 +112,8 @@ class DatabaseConnection():
         food_index = 0
         meal_index = 0
         foods = meal_options[0]
+        nutrition_infos = meal_options[2]
+        restrictions = meal_options[3]
 
         for meal_locs in meal_options[1]:
             # add meal locations for a particular period,
@@ -107,87 +123,55 @@ class DatabaseConnection():
             # once we put it in the table.            
             for food_meal_loc in meal_locs:
                 # TODO do we need TRY/EXCEPT if food already exists?
+                food_name = foods[meal_index][food_index]
+                #print(len(restrictions[meal_index]))
+                #print(len(foods[meal_index]))
+                #print(restrictions[meal_index][food_index])
+                food_restrictions = restrictions[meal_index][food_index]
+                #print(food_restrictions)
+                meal_date = TODAY_STRFTIME
+                meal_period = MEAL_PERIODS[meal_index]
                 
-                # get its frequency first
                 self.cursor.execute(
-                    'SELECT COUNT(FoodName)\
-                        FROM Food\
-                        WHERE FoodName = ? \
-                        GROUP BY FoodName',
-                    foods[meal_index][food_index]
-                )
-                
-                # +1 b/c how i intended it to originally work for potentially updating frequency in the db later...
-                food_freq_arr_tuple_thingy = self.cursor.fetchall()
-                food_freq = food_freq_arr_tuple_thingy[0][0] + 1 if food_freq_arr_tuple_thingy else 1
-                
-                # add the food itself
-                if food_freq > 1:
-                    self.cursor.execute(
-                        'UPDATE Food\
-                        SET Frequency = ?\
-                        WHERE FoodName = ?',
-                        food_freq,
-                        foods[meal_index][food_index]
-                    )
-                    self.cursor.commit()
-                else:
-                    food_restrictions = meal_options[3][meal_index][food_index]
-                    #print(len(meal_options[3][meal_index][food_index]))
-                    # TODO modify food_addfood SP so we can easily do this?
-                    self.cursor.execute(
-                        'INSERT INTO Food(FoodName, Frequency, Restrictions)\
-                        VALUES (?,?,?)',
-                        foods[meal_index][food_index],
-                        food_freq,
-                        food_restrictions
-                    )
-                    self.cursor.commit()
-                    
-                # current food is now mapped to this particular meal date/period
-                self.cursor.execute(
-                    'SELECT Food_ID\
-                    FROM Food\
-                    WHERE FoodName = ?',
-                    foods[meal_index][food_index]
-                )
-                # for queries (not changing the db statements), use cursor.fetchall(), not cursor.commit()...
-                # https://stackoverflow.com/a/11451863
-                food_id = self.cursor.fetchall()[0][0]
-                     
-                self.cursor.execute(
-                    # it's called FoodID in serves, not Food_ID...
-                    # TODO _maybe_ fix this unless this causes too many issues later?
-                    'INSERT INTO Serves(MealDate, MealPeriod, FoodID)\
-                    VALUES (?,?,?)',
-                    TODAY_STRFTIME,
-                    MEAL_PERIODS[meal_index],
-                    food_id
-                )
-                self.cursor.commit()
-                    
-                # add it to the mapped food -> location things
-                # TODO make an "add (food by name) to (location by name)" SP?
-                self.cursor.execute(
-                    'SELECT Location_ID\
-                    FROM BonLocation\
-                    WHERE LocationName = ?',
+                    'EXEC [Food_AddFoodEntry_WithLocAndMeal_ReducedForNow] ?,?,?,?,?',
+                    food_name,
+                    food_restrictions,
+                    meal_date,
+                    meal_period,
                     food_meal_loc
                 )
-                # get just the first location id, don't care about other things in the returned tuple...
-                food_loc_id = self.cursor.fetchall()[0][0]
-                
-                self.cursor.execute(
-                    'IF NOT EXISTS(SELECT Food_ID FROM ServedAt WHERE Food_ID = ? AND Location_ID = ?) BEGIN\
-                        INSERT INTO ServedAt(Food_ID, Location_ID)\
-                        VALUES (?,?)\
-                    END',
-                    food_id,
-                    food_loc_id,
-                    food_id,
-                    food_loc_id
-                )
+                # we still must do a .commit(), even with SPs...
                 self.cursor.commit()
+                
+                # now add its nutrition info, if it exists.
+                if nutrition_infos[meal_index][food_index]:
+                    nutrition_info_entry = nutrition_infos[meal_index][food_index]
+                    # debug bad serving size entries (thanks bone)
+                    # because everything has to have some serving size (it exists) at the very least.
+                    final_serving_size = nutrition_info_entry[1] if nutrition_info_entry[1] > 0 else 0.1
+                    
+                    # don't include bad data (> 100 g fat, > 200 g carbohydrates, > 90 g protein (these are DB constraints), etc)
+                    # (if this happens, this is just a Bone "glitch" and so what's the point of including it in the DB anyway.)
+                    if nutrition_info_entry[3] <= 100.0 and nutrition_info_entry[4] <= 200 and nutrition_info_entry[5] <= 90.0:
+                        self.cursor.execute(
+                        'EXEC [Nutrition_AddNutrition_fixed] ?,?,?,?,?,?',
+                            food_name,
+                            final_serving_size,
+                            nutrition_info_entry[2],
+                            nutrition_info_entry[3],
+                            nutrition_info_entry[4],
+                            nutrition_info_entry[5]
+                        )
+                        self.cursor.commit()
+                    else:
+                        print('[Additional Info] Bone might''ve did an oopsie! Their menu nutrition probably glitched, so we are not adding nutrition info for a menu item with:')
+                        print('Serving Size: %.1f, Calories: %d, Fat: %.1f, Carbs: %d, Protein: %.1f' %
+                            (final_serving_size,
+                            nutrition_info_entry[2],
+                            nutrition_info_entry[3],
+                            nutrition_info_entry[4],
+                            nutrition_info_entry[5])
+                        )
                 
                 food_index += 1
                 
@@ -197,17 +181,49 @@ class DatabaseConnection():
     
     def insert_meals(self):
         for meal_period in MEAL_PERIODS:
+            # TODO: make the Meals_Addmeal_fixed SP build the variety score.
             self.cursor.execute(
-                'IF NOT EXISTS (SELECT MealDate FROM Meal WHERE MealDate = ? AND MealPeriod = ?) BEGIN\
-                    INSERT INTO Meal(MealDate, MealPeriod)\
-                    VALUES(?,?)\
-                END',
-                TODAY_STRFTIME,
-                meal_period,
-                TODAY_STRFTIME,
+                'EXEC [Meals_Addmeal_fixed] ?,?',
+                datetime.datetime.now(),
                 meal_period
             )
+            # we still must do a .commit(), even with SPs...
             self.cursor.commit()
+
+    # Only do this after data was successfully imported since API calls are expensive!
+    def secondary_processing_cuisines_pics(self, meal_options):
+        for food_period_options in meal_options[0]:
+            for food_name in food_period_options:
+                # dupe the ingredient/food option b/c we don't care...
+                cuisine = self.sp_api.classify_cuisine(food_name, food_name).json()['cuisine']
+                
+                pic_args = {'ingredients': food_name, 'limitLicense': True, 'number': '1', 'ranking': '1'}
+                # https://stackoverflow.com/questions/30229231/python-save-image-from-url/30229298
+                import requests
+                # for testing/debugging...
+                #result = self.sp_api.search_recipes_by_ingredients(**pic_args).json()
+                #import ipdb; ipdb.set_trace()
+                # get an image if possible... else don't worry about importing it...
+                sp_json = self.sp_api.search_recipes_by_ingredients(**pic_args).json()
+                if sp_json and len(sp_json) > 0:
+                    picture_response_obj = requests.get(sp_json[0]['image'], stream=True)
+                    # https://stackoverflow.com/a/17011420
+                    picture_binary = picture_response_obj.content
+                else:
+                    # https://www.programiz.com/python-programming/methods/built-in/bytes
+                    # https://requests.readthedocs.io/en/master/user/quickstart/#binary-response-content
+                    # TODO HANDLE THIS ON THE FRONTEND: this is 0x30 in utf 8 (not 0x00 since it isnt supported by sql server i guess...)
+                    picture_binary = bytes('0', 'utf-8')
+                
+                self.cursor.execute(
+                    'EXEC [Food_SecondaryProcessing_AddCuisineAndPicture] ?,?,?',
+                    food_name,
+                    cuisine,
+                    picture_binary
+                )
+                # we still must do a .commit(), even with SPs...
+                self.cursor.commit()
+                
     
     def insert_data(self, meal_options):   
         # need to do stuff in this order b/c of Identity columns...
@@ -215,6 +231,10 @@ class DatabaseConnection():
         self.insert_meals()
         self.insert_loc_food_meal_assocs(meal_options)
         self.insert_nutrition_infos(meal_options)
+        if input("SECONDARY PROCESSING - INVOLVES API CALLS TO SPOONACULAR: Are you sure you want to do this? This may be costly! (Y/N)") != "Y":
+            exit()
+        self.secondary_processing_cuisines_pics(meal_options)
+                
     
 # Adapted from https://www.analyticsvidhya.com/blog/2017/07/web-scraping-in-python-using-scrapy/
 # and https://www.linode.com/docs/development/python/use-scrapy-to-extract-data-from-html-tags/
@@ -253,19 +273,19 @@ class BonSpiderScrapySpiderSpider(scrapy.Spider):
             # Useful ref: https://docs.scrapy.org/en/latest/topics/selectors.html
             # use #breakfast, #lunch, or #dinner as CSS selectors to get each individual meal. Run the script day-of
             # so you get the most up to date options then.
-            meal_names = response.css('#' + meal_period + ' .site-panel__daypart-item-title *::text').getall()
+            food_names = response.css('#' + meal_period + ' .site-panel__daypart-item-title *::text').getall()
             #print(meal_names)
             #meal_names = [fixed_name for fixed_name in meal_names if fixed_item != '\n\t\t\t']
             #meal_names.remove(BORKED_STRING) # \/ replaces this line...
-            meal_names = [fixed_name.replace(BORKED_STRING, '').replace('\t', '') for fixed_name in meal_names if fixed_name != '\n\t\t\t']
-            names_sorted_by_meal.append(meal_names)
+            food_names = [fixed_name.replace(BORKED_STRING, '').replace('\t', '') for fixed_name in food_names if fixed_name != '\n\t\t\t']
+            names_sorted_by_meal.append(food_names)
             #print(meal_names)
 
             # Get their locations,
-            meal_locations = response.css('#' + meal_period + ' .site-panel__daypart-item-station *::text').getall()
-            #print(meal_locations)
+            food_locations = response.css('#' + meal_period + ' .site-panel__daypart-item-station *::text').getall()
+            #print(food_locations)
 
-            locations_sorted_by_meal.append(meal_locations)
+            locations_sorted_by_meal.append(food_locations)
 
             # Get their nutrition info and restrictions (NOTE: have to get food name ... OR get value start and end index ...
             # to do further association in DB itself...),
@@ -329,58 +349,67 @@ class BonSpiderScrapySpiderSpider(scrapy.Spider):
             # one list for each info for later appending to the list by meal
             nutrition_meal_ls = []
             restrictions_meal_ls = []
-            # restrict this to [curr_nutr_index : curr_nutr_index + number of breakfast items]
-            for meal_json_item in list(python_json.values())[curr_nutr_index : curr_nutr_index+len(meal_locations)]:
-                # If it doesn't exist, have a ~None ("null") object~ empty list
-                # as temporary for database import (it will skip over it).
-                meal_json_item_nutrition_dict = meal_json_item.get('nutrition_details')
-
-                if meal_json_item_nutrition_dict:
-                    # Being Pythonic FTW!
-                    nutrition_meal_ls.append(
-                        [
-                            meal_json_item['label'],
-                            # serving size (always in oz...)
-                            meal_json_item_nutrition_dict['servingSize']['value'],
-                            # calorie content
-                            meal_json_item_nutrition_dict['calories']['value'],
-                            # total fat content
-                            meal_json_item_nutrition_dict['fatContent']['value'],
-                            # carbs
-                            meal_json_item_nutrition_dict['carbohydrateContent']['value'],
-                            # protein
-                            meal_json_item_nutrition_dict['proteinContent']['value']
-                        ]
-                    )
-                else:
-                    # appending None won't append anything :(, so append empty list...
-                    nutrition_meal_ls.append([])
+            # new strategy: view all meal items but check if they're the same as in the food items list (find the entry that is the same, inefficient but
+            # it works)
+            # then add nutrition info / restrictions info
+            for food_name in food_names:
+                meal_json_item = []
+                # find key by value
+                for potential_json_item in list(python_json.values()):
+                    if food_name.lower() == potential_json_item['label']:
+                        meal_json_item = potential_json_item
                 
-                # add restrictions (if they exist), we don't care about the weird numbers...
-                # if meal_json_item.get('cor_icon') is None, just add None...
-                meal_json_item_restrictions_dict = meal_json_item.get('cor_icon')
-                if meal_json_item_restrictions_dict:
-                    # only get first value (if it exists), because an option can be either vegetarian or vegan (but not both)
-                    # i.e. mutually excl.
-                    final_restrs = [
-                        r
-                        for r in meal_json_item_restrictions_dict.values()
-                        if r == 'Made without Gluten-Containing Ingredients' or r == 'Vegetarian' or r == 'Vegan'
-                    ]
-                    if final_restrs:
-                        # TODO allow vegeterian + gluten free OR vegan + gluten free in DB and in here
-                        # first thing to do here is just remove the [0] to get all restrs.
-                        # second thing is change the way items are added to DB later on...
-                        restrictions_meal_ls.append(final_restrs[0])
+                if meal_json_item:
+                    # Get nutrition info for meal item
+                    meal_json_item_nutrition_dict = meal_json_item.get('nutrition_details')
+                    if meal_json_item_nutrition_dict:
+                        # Being Pythonic FTW!
+                        nutrition_meal_ls.append(
+                            [
+                                meal_json_item['label'],
+                                # serving size (always in oz...)
+                                float(meal_json_item_nutrition_dict['servingSize']['value']),
+                                # calorie content
+                                int(meal_json_item_nutrition_dict['calories']['value']),
+                                # total fat content
+                                float(meal_json_item_nutrition_dict['fatContent']['value']),
+                                # carbs
+                                int(meal_json_item_nutrition_dict['carbohydrateContent']['value']),
+                                # protein
+                                float(meal_json_item_nutrition_dict['proteinContent']['value'])
+                            ]
+                        )
                     else:
+                        # appending None won't append anything, so append empty list...
+                        nutrition_meal_ls.append([])
+                        
+                    # add restrictions (if they exist) so use .get() to do this, we don't care about the weird numbers...
+                    meal_json_item_restrictions_dict = meal_json_item.get('cor_icon')
+                    if meal_json_item_restrictions_dict:
+                        # only get first value (if it exists), because an option can be either vegetarian or vegan (but not both)
+                        # i.e. mutually excl.
+                        final_restrs = [
+                            r
+                            for r in meal_json_item_restrictions_dict.values()
+                            if r == 'Made without Gluten-Containing Ingredients' or r == 'Vegetarian' or r == 'Vegan'
+                        ]
+                        if final_restrs:
+                            # TODO allow vegeterian + gluten free OR vegan + gluten free in DB and in here
+                            # first thing to do here is just remove the [0] to get all restrs.
+                            # second thing is change the way items are added to DB later on...
+                            restrictions_meal_ls.append(final_restrs[0])
+                        else:
+                            # if meal_json_item.get('cor_icon') is None, just add 'None'...
+                            restrictions_meal_ls.append('None')
+                    else:
+                        # appending None won't append anything, so append 'None'...
                         restrictions_meal_ls.append('None')
+                # If it doesn't exist, use an empty list for nutrition and 'None' for restrictions so we input correct info in the DB.
+                # (we could do it differently, e.g. have 0s for nutrition, but i want to do it this way, because of how the app will process
+                # restrictions information, by showing the label. for nutrition info, it won't show a place to go to it at all)
                 else:
-                    # appending None won't append anything :(, so append 'None'...
+                    nutrition_meal_ls.append([])
                     restrictions_meal_ls.append('None')
-
-            # increment it for the next meal...
-            curr_nutr_index = curr_nutr_index + len(meal_locations)
-            print(restrictions_meal_ls)
         
             nutrition_sorted_by_meal.append(nutrition_meal_ls)
             restrictions_sorted_by_meal.append(restrictions_meal_ls)
