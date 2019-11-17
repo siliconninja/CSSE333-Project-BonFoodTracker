@@ -18,8 +18,7 @@ NEWSPIDER_MODULE = 'bon_spider.spiders'
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 #USER_AGENT = 'bon_spider (+http://www.yourdomain.com)'
 
-# Don't obey robots.txt rules (to fix the bon trying to forbid scrapers)
-# https://stackoverflow.com/a/37278895
+# Don't Obey robots.txt rules
 ROBOTSTXT_OBEY = False
 
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
